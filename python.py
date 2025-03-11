@@ -87,21 +87,35 @@ def stream_response(user_input, token):
         if token == current_token:
             socketio.emit('thinking_status', {'status': False})
 
-# Function to handle speech recognition
+# Function to handle speech recognition with improved error handling
 def recognize_speech():
     recognizer = sr.Recognizer()
     
     try:
+        print("Starting speech recognition")
         socketio.emit('listening_status', {'status': True})
         
+        # List available microphones for debugging
+        try:
+            mics = sr.Microphone.list_microphone_names()
+            print(f"Available microphones: {mics}")
+        except Exception as mic_err:
+            print(f"Warning: Could not list microphones: {mic_err}")
+        
         with sr.Microphone() as source:
+            print("Microphone initialized")
+            print("Adjusting for ambient noise...")
             recognizer.adjust_for_ambient_noise(source, duration=1)
+            print("Listening for speech...")
             audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
+            print("Audio captured")
         
         socketio.emit('listening_status', {'status': False})
         
         # Convert Speech to Text
+        print("Recognizing speech...")
         user_input = recognizer.recognize_google(audio)
+        print(f"Speech recognized: '{user_input}'")
         
         # Emit recognized speech
         socketio.emit('speech_recognized', {'text': user_input})
@@ -113,14 +127,19 @@ def recognize_speech():
         thread.start()
         
     except sr.UnknownValueError:
+        print("Speech recognition could not understand audio")
         socketio.emit('listening_status', {'status': False})
         socketio.emit('error_message', {'message': 'Sorry, I couldn\'t understand. Please try again.'})
     except sr.RequestError as e:
+        print(f"Google Speech Recognition service error: {e}")
         socketio.emit('listening_status', {'status': False})
         socketio.emit('error_message', {'message': f'Error in speech recognition service: {str(e)}'})
     except Exception as e:
+        print(f"Speech recognition error: {e}")
+        import traceback
+        traceback.print_exc()
         socketio.emit('listening_status', {'status': False})
-        socketio.emit('error_message', {'message': f'An error occurred: {str(e)}'})
+        socketio.emit('error_message', {'message': f'An error occurred during speech recognition: {str(e)}'})
 
 # Function to generate speech audio optimized for sentence-by-sentence processing
 def text_to_speech(text):
@@ -205,6 +224,25 @@ def test_tts():
     text_to_speech("This is a test of the text to speech system.")
     return "Testing TTS functionality. Check console for logs."
 
+@app.route('/test_mic')
+def test_mic():
+    print("Testing microphone setup")
+    try:
+        mic_list = sr.Microphone.list_microphone_names()
+        return jsonify({
+            'status': 'success',
+            'microphones': mic_list,
+            'count': len(mic_list)
+        })
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'traceback': error_trace
+        })
+
 @socketio.on('send_message')
 def handle_message(data):
     global current_token, tts_queue
@@ -288,6 +326,7 @@ if __name__ == '__main__':
         .status-bar { margin-top: 15px; padding: 5px 10px; background-color: #f5f5f5; border-radius: 5px; font-size: 0.85rem; color: #757575; }
         @media (max-width: 576px) { .chat-container { height: 95vh; border-radius: 0; box-shadow: none; } .message { max-width: 85%; } }
         .debug-panel { padding: 10px; background-color: #f0f0f0; border-radius: 5px; margin-top: 10px; font-family: monospace; font-size: 0.8rem; max-height: 100px; overflow-y: auto; display: none; }
+        .mic-status { background-color: #f5f5f5; padding: 10px; margin-top: 10px; border-radius: 5px; }
     </style>
 </head>
 <body>
@@ -312,6 +351,7 @@ if __name__ == '__main__':
             </div>
             <div class="status-bar" id="statusBar">Ready</div>
             <div class="debug-panel" id="debugPanel"></div>
+            <div class="mic-status" id="micStatus" style="display: none;"></div>
         </div>
     </div>
     <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
@@ -324,6 +364,7 @@ if __name__ == '__main__':
             const voiceButton = document.getElementById('voiceButton');
             const statusBar = document.getElementById('statusBar');
             const debugPanel = document.getElementById('debugPanel');
+            const micStatus = document.getElementById('micStatus');
             
             // Uncomment to enable debug panel
             // debugPanel.style.display = 'block';
@@ -355,6 +396,66 @@ if __name__ == '__main__':
                         debugLog("Error initializing audio context: " + e);
                     }
                 }
+            }
+            
+            // Check microphone availability
+            async function checkMicrophone() {
+                try {
+                    // Check if microphone is available
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const hasMic = devices.some(device => device.kind === 'audioinput');
+                    
+                    if (!hasMic) {
+                        debugLog("No microphone detected!");
+                        micStatus.textContent = "❌ No microphone detected. Voice input will not work.";
+                        micStatus.style.display = "block";
+                        micStatus.style.color = "#f44336";
+                        voiceButton.disabled = true;
+                        voiceButton.title = "No microphone available";
+                        return false;
+                    }
+                    
+                    // Check if we have permission
+                    try {
+                        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        stream.getTracks().forEach(track => track.stop());
+                        micStatus.textContent = "✅ Microphone available and permission granted.";
+                        micStatus.style.color = "#4CAF50";
+                        debugLog("Microphone permission granted");
+                        return true;
+                    } catch (err) {
+                        debugLog("Microphone permission denied: " + err);
+                        micStatus.textContent = "⚠️ Microphone permission denied. Voice input will not work.";
+                        micStatus.style.color = "#FF9800";
+                        voiceButton.title = "Microphone permission required";
+                        return false;
+                    }
+                } catch (err) {
+                    debugLog("Error checking microphone: " + err);
+                    micStatus.textContent = "⚠️ Cannot check microphone status. Voice input may not work.";
+                    micStatus.style.color = "#FF9800";
+                    return false;
+                } finally {
+                    micStatus.style.display = "block";
+                }
+            }
+            
+            // Test server-side microphone detection
+            function testServerMicrophone() {
+                fetch('/test_mic')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            debugLog(`Server detected ${data.count} microphones: ${data.microphones.join(', ')}`);
+                            micStatus.innerHTML += `<br>Server-side: ${data.count} microphone(s) detected.`;
+                        } else {
+                            debugLog(`Server-side microphone error: ${data.message}`);
+                            micStatus.innerHTML += `<br>Server-side error: ${data.message}`;
+                        }
+                    })
+                    .catch(error => {
+                        debugLog("Error testing server microphone: " + error);
+                    });
             }
             
             function sendMessage() {
@@ -391,6 +492,13 @@ if __name__ == '__main__':
                 return thinkingElement;
             }
             
+            // Run microphone checks on startup
+            checkMicrophone().then(micAvailable => {
+                if (micAvailable) {
+                    testServerMicrophone();
+                }
+            });
+            
             sendButton.addEventListener('click', sendMessage);
             
             messageInput.addEventListener('keypress', function(e) {
@@ -402,18 +510,22 @@ if __name__ == '__main__':
             voiceButton.addEventListener('click', function() {
                 if (!isListening && !isThinking) {
                     initAudioContext(); // Initialize audio context with user interaction
-                    debugLog("Starting voice input");
-                    socket.emit('start_voice_input');
-                }
-            });
-            
-            // Test button for debugging
-            document.addEventListener('keydown', function(e) {
-                if (e.ctrlKey && e.shiftKey && e.key === 'T') {
-                    fetch('/test_tts')
-                        .then(response => response.text())
-                        .then(data => debugLog("TTS Test: " + data))
-                        .catch(error => debugLog("TTS Test Error: " + error));
+                    
+                    // Check microphone permission again when button is clicked
+                    navigator.mediaDevices.getUserMedia({ audio: true })
+                        .then(stream => {
+                            stream.getTracks().forEach(track => track.stop());
+                            debugLog("Starting voice input");
+                            socket.emit('start_voice_input');
+                        })
+                        .catch(err => {
+                            debugLog("Microphone permission denied when activating: " + err);
+                            const errorElement = document.createElement('div');
+                            errorElement.className = 'message system-message';
+                            errorElement.textContent = 'Microphone access denied. Please allow microphone access in your browser settings.';
+                            chatMessages.appendChild(errorElement);
+                            chatMessages.scrollTop = chatMessages.scrollHeight;
+                        });
                 }
             });
             
