@@ -15,7 +15,7 @@ app = Flask(__name__)
 socketio = SocketIO(app)
 
 # Mistral API Configuration
-MISTRAL_API_KEY = "XZDVrVnzsZTnakgniECWmP9OS6QjhaiY"
+MISTRAL_API_KEY = "Enter_Your_API_KEY"
 MISTRAL_MODEL = "mistral-medium"
 MISTRAL_ENDPOINT = "https://api.mistral.ai/v1/chat/completions"
 
@@ -89,57 +89,56 @@ def stream_response(user_input, token):
 
 # Function to handle speech recognition with improved error handling
 def recognize_speech():
+    global current_token, tts_queue
     recognizer = sr.Recognizer()
-    
+
     try:
         print("Starting speech recognition")
         socketio.emit('listening_status', {'status': True})
-        
-        # List available microphones for debugging
-        try:
-            mics = sr.Microphone.list_microphone_names()
-            print(f"Available microphones: {mics}")
-        except Exception as mic_err:
-            print(f"Warning: Could not list microphones: {mic_err}")
-        
+
         with sr.Microphone() as source:
-            print("Microphone initialized")
             print("Adjusting for ambient noise...")
             recognizer.adjust_for_ambient_noise(source, duration=1)
             print("Listening for speech...")
             audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
             print("Audio captured")
-        
+
         socketio.emit('listening_status', {'status': False})
-        
-        # Convert Speech to Text
+
         print("Recognizing speech...")
         user_input = recognizer.recognize_google(audio)
         print(f"Speech recognized: '{user_input}'")
-        
-        # Emit recognized speech
+
         socketio.emit('speech_recognized', {'text': user_input})
-        
-        # Process the response in a new thread with the current token
-        global current_token
+
+        # **Cancel previous processing before starting a new one**
+        current_token += 1
+        print(f"Cancelling previous processing, new token: {current_token}")
+
+        with tts_queue.mutex:
+            queue_size = len(tts_queue.queue)
+            tts_queue.queue.clear()
+            print(f"Cleared TTS queue ({queue_size} items removed)")
+
+        socketio.emit('stop_audio')
+        print("Sent stop_audio signal to client")
+
+        # **Start response streaming for speech input**
         thread = threading.Thread(target=stream_response, args=(user_input, current_token))
         thread.daemon = True
         thread.start()
-        
+
     except sr.UnknownValueError:
         print("Speech recognition could not understand audio")
-        socketio.emit('listening_status', {'status': False})
-        socketio.emit('error_message', {'message': 'Sorry, I couldn\'t understand. Please try again.'})
+        socketio.emit('error_message', {'message': "Sorry, I couldn't understand. Please try again."})
     except sr.RequestError as e:
-        print(f"Google Speech Recognition service error: {e}")
-        socketio.emit('listening_status', {'status': False})
-        socketio.emit('error_message', {'message': f'Error in speech recognition service: {str(e)}'})
+        print(f"Speech recognition service error: {e}")
+        socketio.emit('error_message', {'message': f"Error in speech recognition service: {str(e)}"})
     except Exception as e:
         print(f"Speech recognition error: {e}")
         import traceback
         traceback.print_exc()
-        socketio.emit('listening_status', {'status': False})
-        socketio.emit('error_message', {'message': f'An error occurred during speech recognition: {str(e)}'})
+        socketio.emit('error_message', {'message': f"An error occurred during speech recognition: {str(e)}"})
 
 # Function to generate speech audio optimized for sentence-by-sentence processing
 def text_to_speech(text):
